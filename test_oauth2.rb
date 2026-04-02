@@ -322,22 +322,18 @@ def test_mqtt_read_only(opts, token_endpoint)
   client_ro = mqtt_connect_client(opts[:mqtt], token_ro, client_id: "oauth-mqtt-ro")
   pass!("mqtt read-only: connects")
 
-  # Subscribe should work (has read)
+  # Mqtt subscribe only works when both write and read permission
   client_ro.subscribe("oauth/test/ro")
-  pass!("mqtt read-only: subscribe works")
-
-  # Publish should cause the broker to disconnect the client (no write permission)
-  client_ro.publish("oauth/test/ro", "ro-should-not-arrive", false, 1)
   begin
     Timeout.timeout(2) do
       client_ro.get # should raise because broker closes the connection
     end
-    fail!("mqtt read-only: publish rejected", "publish did not cause disconnect")
+    fail!("mqtt read-only: subscribe rejected", "subscribe did not cause disconnect")
   rescue MQTT::ProtocolException, Errno::ECONNRESET, EOFError, Timeout::Error
-    pass!("mqtt read-only: publish rejected")
+    pass!("mqtt read-only: subscribe rejected")
   end
 rescue MQTT::ProtocolException, Errno::ECONNRESET, EOFError => e
-  pass!("mqtt read-only: publish rejected (#{e.message})")
+  pass!("mqtt read-only: subscribe rejected (#{e.message})")
 rescue => e
   fail!("mqtt read-only", e.message)
 end
