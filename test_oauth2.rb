@@ -44,14 +44,24 @@ def discover_token_endpoint(issuer)
   endpoint
 end
 
-def fetch_token(token_endpoint, client_id, client_secret, scope: nil, audience: nil)
+def fetch_token(token_endpoint, client_id, client_secret, scope: nil, audience: nil, username: nil, password: nil)
   uri = URI(token_endpoint)
-  params = {
-    "grant_type"    => "client_credentials",
-    "client_id"     => client_id,
-    "client_secret" => client_secret,
-  }
-  # params["scope"] = scope if scope
+  if username
+    params = {
+      "grant_type"    => "password",
+      "client_id"     => client_id,
+      "client_secret" => client_secret,
+      "username"      => username,
+      "password"      => password,
+    }
+  else
+    params = {
+      "grant_type"    => "client_credentials",
+      "client_id"     => client_id,
+      "client_secret" => client_secret,
+    }
+  end
+  params["scope"] = scope if scope
   params["audience"] = audience if audience
 
   resp = Net::HTTP.post_form(uri, params)
@@ -122,16 +132,12 @@ end
 
 # ── Scope helpers ─────────────────────────────────────────────────────────────
 
-def scoped(prefix, scopes)
-  return scopes if prefix.nil? || prefix.empty?
-
-  scopes.split.map { |s| "#{prefix}#{s}" }.join(" ")
-end
-
-def get_token(opts, token_endpoint, scope)
+def get_token(opts, token_endpoint)
+  effective_scope = opts[:scope_prefix]
   token = fetch_token(token_endpoint, opts[:client_id], opts[:client_secret],
-                      scope: scoped(opts[:scope_prefix], scope),
-                      audience: opts[:audience])
+                      scope: effective_scope,
+                      audience: opts[:audience],
+                      username: opts[:username], password: opts[:password])
   parts = token.split(".")
   if parts.size == 3
     payload = JSON.parse(Base64.urlsafe_decode64(parts[1] + "=" * (-parts[1].size % 4)))
@@ -157,7 +163,7 @@ end
 
 def test_amqp_publish_consume(opts, token_endpoint)
   puts "\n== AMQP: publish & consume =="
-  token = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token = get_token(opts, token_endpoint)
   conn = amqp_connect(opts[:amqp], token)
   ch = conn.create_channel
   q = ch.queue("", exclusive: true)
@@ -172,7 +178,7 @@ end
 
 def test_amqp_read_only(opts, token_endpoint)
   puts "\n== AMQP: read-only scope =="
-  token = get_token(opts, token_endpoint, "read:%2F/*")
+  token = get_token(opts, token_endpoint)
   conn = amqp_connect(opts[:amqp], token)
   ch = conn.create_channel
   begin
@@ -190,7 +196,7 @@ end
 
 def test_amqp_write_only(opts, token_endpoint)
   puts "\n== AMQP: write-only scope =="
-  token = get_token(opts, token_endpoint, "write:%2F/* configure:%2F/*")
+  token = get_token(opts, token_endpoint)
   conn = amqp_connect(opts[:amqp], token)
   ch = conn.create_channel
   q = ch.queue("", exclusive: true)
@@ -209,7 +215,7 @@ end
 
 def test_amqp_configure_only(opts, token_endpoint)
   puts "\n== AMQP: configure-only scope =="
-  token = get_token(opts, token_endpoint, "configure:%2F/*")
+  token = get_token(opts, token_endpoint)
   conn = amqp_connect(opts[:amqp], token)
   ch = conn.create_channel
   ch.queue("", exclusive: true)
@@ -228,7 +234,7 @@ def test_amqp_tags(opts, token_endpoint)
     return
   end
   %w[administrator monitoring management policymaker impersonator].each do |tag|
-    token = get_token(opts, token_endpoint, "tag:#{tag} read:%2F/* write:%2F/* configure:%2F/*")
+    token = get_token(opts, token_endpoint)
     uri = URI("#{opts[:http]}/api/whoami")
     req = Net::HTTP::Get.new(uri)
     req.basic_auth("unused", token)
@@ -249,7 +255,7 @@ end
 
 def test_amqp_expired_token(opts, token_endpoint)
   puts "\n== AMQP: token expiration =="
-  token = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token = get_token(opts, token_endpoint)
   tampered = tamper_token_expiry(token)
   unless tampered
     skip!("amqp tampered expired token", "could not parse token")
@@ -266,14 +272,14 @@ end
 
 def test_amqp_refresh(opts, token_endpoint)
   puts "\n== AMQP: token refresh =="
-  token1 = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token1 = get_token(opts, token_endpoint)
   conn = amqp_connect(opts[:amqp], token1)
   unless conn.respond_to?(:update_secret)
     skip!("update_secret", "bunny version does not support it")
     conn.close
     return
   end
-  token2 = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token2 = get_token(opts, token_endpoint)
   conn.update_secret(token2, "refresh")
   ch = conn.create_channel
   q = ch.queue("", exclusive: true)
@@ -294,7 +300,7 @@ def test_mqtt_publish_subscribe(opts, token_endpoint)
     skip!("mqtt publish+subscribe", "no --mqtt provided")
     return
   end
-  token = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token = get_token(opts, token_endpoint)
   client = mqtt_connect_client(opts[:mqtt], token, client_id: "oauth-mqtt-pubsub")
   pass!("mqtt connect")
 
@@ -318,7 +324,7 @@ def test_mqtt_read_only(opts, token_endpoint)
     skip!("mqtt read-only", "no --mqtt provided")
     return
   end
-  token_ro = get_token(opts, token_endpoint, "read:%2F/*")
+  token_ro = get_token(opts, token_endpoint)
   client_ro = mqtt_connect_client(opts[:mqtt], token_ro, client_id: "oauth-mqtt-ro")
   pass!("mqtt read-only: connects")
 
@@ -344,7 +350,7 @@ def test_mqtt_write_only(opts, token_endpoint)
     skip!("mqtt write-only", "no --mqtt provided")
     return
   end
-  token_wo = get_token(opts, token_endpoint, "write:%2F/* configure:%2F/*")
+  token_wo = get_token(opts, token_endpoint)
   client_wo = mqtt_connect_client(opts[:mqtt], token_wo, client_id: "oauth-mqtt-wo")
 
   # Publish should work (has write)
@@ -373,7 +379,7 @@ def test_mqtt_configure_only(opts, token_endpoint)
     skip!("mqtt configure-only", "no --mqtt provided")
     return
   end
-  token = get_token(opts, token_endpoint, "configure:%2F/*")
+  token = get_token(opts, token_endpoint)
   client = mqtt_connect_client(opts[:mqtt], token, client_id: "oauth-mqtt-co")
   pass!("mqtt configure-only: connects")
   # No read or write — publish+subscribe should be ineffective
@@ -403,7 +409,7 @@ def test_mqtt_tags(opts, token_endpoint)
     return
   end
   %w[administrator management monitoring].each do |tag|
-    token = get_token(opts, token_endpoint, "tag:#{tag} read:%2F/* write:%2F/* configure:%2F/*")
+    token = get_token(opts, token_endpoint)
     client = mqtt_connect_client(opts[:mqtt], token, client_id: "oauth-mqtt-#{tag}")
     pass!("mqtt tag:#{tag} connects")
     client.disconnect
@@ -420,7 +426,7 @@ def test_mqtt_expired_token(opts, token_endpoint)
     skip!("mqtt expired token", "no --mqtt provided")
     return
   end
-  token = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token = get_token(opts, token_endpoint)
   tampered = tamper_token_expiry(token)
   unless tampered
     skip!("mqtt tampered expired token", "could not parse token")
@@ -443,12 +449,12 @@ def test_mqtt_refresh(opts, token_endpoint)
   end
   # MQTT 3.1.1 does not support token refresh (no update_secret equivalent).
   # The only way to refresh is to disconnect and reconnect with a new token.
-  token1 = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token1 = get_token(opts, token_endpoint)
   client = mqtt_connect_client(opts[:mqtt], token1, client_id: "oauth-mqtt-refresh")
   pass!("mqtt refresh: initial connect")
   client.disconnect
 
-  token2 = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token2 = get_token(opts, token_endpoint)
   client2 = mqtt_connect_client(opts[:mqtt], token2, client_id: "oauth-mqtt-refresh")
   client2.subscribe("oauth/test/refresh")
   Thread.new do
@@ -480,7 +486,7 @@ def test_http_management(opts, token_endpoint)
   end
 
   # Admin
-  token = get_token(opts, token_endpoint, "tag:administrator read:%2F/* write:%2F/* configure:%2F/*")
+  token = get_token(opts, token_endpoint)
   uri = URI("#{opts[:http]}/api/overview")
   req = Net::HTTP::Get.new(uri)
   req.basic_auth("unused", token)
@@ -489,7 +495,7 @@ def test_http_management(opts, token_endpoint)
   check("admin /api/overview", resp.is_a?(Net::HTTPSuccess), "status=#{resp.code}")
 
   # No tag
-  token_notag = get_token(opts, token_endpoint, "read:%2F/* write:%2F/* configure:%2F/*")
+  token_notag = get_token(opts, token_endpoint)
   req2 = Net::HTTP::Get.new(uri)
   req2.basic_auth("unused", token_notag)
   resp2 = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https",
@@ -562,7 +568,9 @@ OptionParser.new do |p|
   p.on("--mqtt HOST:PORT",    "MQTT host:port")                     { |v| opts[:mqtt] = v }
   p.on("--http URL",          "Management HTTP URL")                { |v| opts[:http] = v }
   p.on("--audience AUD",      "Token audience (required by Auth0)") { |v| opts[:audience] = v }
-  p.on("--scope-prefix PFX",  "Scope prefix (e.g. 'lavinmq.')")    { |v| opts[:scope_prefix] = v }
+  p.on("--scope-prefix PFX",  "Scope to request in token requests") { |v| opts[:scope_prefix] = v }
+  p.on("--username USER",     "Resource owner username (Keycloak)") { |v| opts[:username] = v }
+  p.on("--password PASS",     "Resource owner password (Keycloak)") { |v| opts[:password] = v }
 end.parse!
 
 %i[issuer client_id client_secret amqp].each do |key|
